@@ -1,78 +1,123 @@
-# POC test plan and recorded results
+# Resolver integration: test plan and recorded results
 
-Recorded on 2026-11-08 on macOS arm64 with Go 1.27.2. Commands below run
-from the `coredns-recurse` checkout unless they explicitly change directory.
-The examples require the sibling SDNS checkout with `patches/sdns-embedded.patch`
-applied. CoreDNS source is pinned in CI to
-`f79be2a2f8266c2881d01f4c884149e8067569c9`; SDNS's base is
-`2226f31b50fd1f146f452165acdcd7520213ea8f`.
+Recorded 2026-11-08, Go 1.27.2, macOS arm64. Plugin commands run from this
+repository; SDNS commands below run from its source checkout.
+
+The SDNS implementation is commit `7b531a3bbf7999d51f6e039d20a6b92a3082b118`
+in the user's fork. `go.mod` pins that commit through a standard module
+replacement. No patch application or local sibling module is needed for plugin
+builds. CoreDNS source remains pinned to
+`f79be2a2f8266c2881d01f4c884149e8067569c9` in CI.
+
+## Design under test
+
+Use `resolver.New(cfg)` with ordinary `config.Config` settings. `Registry.Build`
+wires all dependencies, restores state, and starts maintenance. Owning pipelines
+stop and persist their handlers through instance methods. There is no special
+embedding constructor, constructor boolean, or background-disable setting.
+
+Maintenance includes root priming, trust-anchor upkeep, pruning, bounded
+nameserver enrichment, refresh, and TCP pooling. Shutdown cancels/joins owned
+work and cleanup loops. Shared bounded enrichment workers skip stopped owners.
+The standalone SDNS server uses the same lifecycle.
 
 ## Automated coverage
 
-| Check | Automation | What it proves |
+| Check | Coverage | Automation |
 | --- | --- | --- |
-| Plugin tests with `-race` | Plugin PR CI | A/NXDOMAIN replies, fail-closed errors, input validation, preservation of the original request, request deadlines, cancellation, concurrent requests, and independent resolver instances. |
-| `TestEmbeddedReferralWalk` with `-race` | Plugin PR CI and SDNS's existing `make test` CI | SDNS follows a synthetic root referral, resolves an out-of-bailiwick nameserver through the isolated queryer, and returns `192.0.2.42` without enabling enrichment lanes or changing global pipeline readiness. |
-| Compile CoreDNS with external plugin | Plugin PR CI | Real `plugin.cfg` registration, module replacements, code generation, full CoreDNS build, and `recurse` in `-plugins`. |
-| `TestCoreDNSEndToEnd` | Plugin PR CI | A real CoreDNS child process serves A requests over UDP and TCP through the plugin and embedded SDNS against an unprivileged local authoritative fixture; graceful shutdown also succeeds. |
-| `TestCoreDNSPublicRecursion` | Explicit opt-in automated test | A fresh CoreDNS process starts from public root hints and returns A records for `example.org` over UDP and TCP. Requires outbound DNS access. |
+| `TestRegistryLifecycle` | Wiring, restore, startup, and one-time shutdown order. | Plugin CI and SDNS's existing test suite. |
+| `TestResolverPipelineLifecycle` | Ordinary configuration starts actual local root priming independently of global readiness; shutdown cancels/joins active enrichment and closes TCP/singleflight cleanup. | Plugin CI and SDNS's existing test suite. |
+| `TestResolverStopBeforeStart` | A stopped instance cannot restart. | Plugin CI and SDNS's existing test suite. |
+| Existing SDNS tests | Recursive referrals, DNSSEC validation, caching, pooling, and server behavior. The new tests do not rebuild the existing synthetic referral network. | Full local SDNS race suite; existing SDNS CI definition. |
+| Plugin race tests | A/NXDOMAIN, CNAME completion, immutable caller messages, deadlines, cancellation, concurrent independent instances, shutdown admission/drain, UDP truncation, retained DNSSEC error details, and regular SDNS config loading. | Plugin CI. |
+| `TestCoreDNSEndToEnd` | Real CoreDNS binary, regular SDNS config file, local authority, UDP and TCP A replies, and graceful shutdown. | Plugin CI. |
+| `TestCoreDNSInvalidReload` | A rejected replacement configuration leaves the previous resolver serving. | Plugin CI. |
+| `TestCoreDNSPublicRecursion` | Normal sample config validates a public A lookup, with AD required over UDP and TCP. | Explicit opt-in automated test; outbound DNS required. |
 
-The deterministic binary fixture answers authoritatively at the configured test
-root. It tests the complete client/server integration; referral walking is
-covered separately by the SDNS fixture and the public-recursion test. Default
-`go test` skips binary tests unless `COREDNS_BINARY` is set, so CI builds the
-binary and explicitly runs the deterministic binary test afterward. Public DNS
-is not a required CI dependency.
+The deterministic authority fixture answers at the configured test root.
+Existing SDNS tests cover referral walking; the public test also walks real
+root/TLD/authority servers. Public DNS is not a CI prerequisite. SDNS's fork
+has not initialized its own workflow runs; plugin CI explicitly executes its
+focused lifecycle tests from the pinned source.
 
-## Plugin race suite
+## SDNS full race suite
 
 ```sh
 go test -race ./... -count=1
 ```
 
+All packages passed. Relevant output excerpt:
+
 ```text
-ok  	github.com/MKrupauskas/coredns-recurse	1.523s
+ok  	github.com/semihalev/sdns	2.582s
+ok  	github.com/semihalev/sdns/middleware	1.356s
+ok  	github.com/semihalev/sdns/middleware/cache	8.259s
+ok  	github.com/semihalev/sdns/middleware/resolver	54.781s
+ok  	github.com/semihalev/sdns/middleware/resolver/dnssec	2.167s
+ok  	github.com/semihalev/sdns/middleware/resolver/localroot	1.882s
+ok  	github.com/semihalev/sdns/server	32.361s
 ```
-
-## SDNS resolver regressions
-
-The full resolver package passed with the race detector:
 
 ```sh
-(cd ../sdns && go test -race ./middleware/resolver -count=1)
+go test -race ./middleware ./middleware/resolver -run 'Test(RegistryLifecycle|ResolverPipelineLifecycle|ResolverStopBeforeStart)$' -count=1 -v
 ```
 
 ```text
-ok  	github.com/semihalev/sdns/middleware/resolver	54.834s
-```
-
-Focused handler, hermetic-resolution, and embedding regressions:
-
-```sh
-(cd ../sdns && go test -race ./middleware/resolver -run 'Test(Embedded|HermeticResolve|Handler)' -count=1)
-```
-
-```text
-ok  	github.com/semihalev/sdns/middleware/resolver	1.957s
-```
-
-The embedding-specific run below also uses the race detector. Output excerpt
-(the fixture debug logs are omitted):
-
-```sh
-(cd ../sdns && go test -race ./middleware/resolver -run '^TestEmbeddedReferralWalk$' -count=1 -v)
-```
-
-```text
-=== RUN   TestEmbeddedReferralWalk
---- PASS: TestEmbeddedReferralWalk (0.05s)
+=== RUN   TestRegistryLifecycle
+--- PASS: TestRegistryLifecycle (0.00s)
 PASS
-ok  	github.com/semihalev/sdns/middleware/resolver	1.280s
+ok  	github.com/semihalev/sdns/middleware	1.231s
+=== RUN   TestResolverPipelineLifecycle
+--- PASS: TestResolverPipelineLifecycle (0.01s)
+=== RUN   TestResolverStopBeforeStart
+--- PASS: TestResolverStopBeforeStart (0.00s)
+PASS
+ok  	github.com/semihalev/sdns/middleware/resolver	1.302s
 ```
 
-## Build and deterministic binary smoke test
+## Allocation and documentation gates
 
-Build output excerpt (dependency upgrade messages omitted):
+Both commands exited successfully. Allocation output excerpt:
+
+```sh
+go test -count=1 -run 'Alloc|ServeRawHitClasses' ./...
+```
+
+```text
+ok  	github.com/semihalev/sdns/middleware/resolver	1.760s
+ok  	github.com/semihalev/sdns/middleware/resolver/dnssec	1.757s
+ok  	github.com/semihalev/sdns/middleware/resolver/localroot	1.683s [no tests to run]
+?   	github.com/semihalev/sdns/middleware/resolver/localroot/roottest	[no test files]
+ok  	github.com/semihalev/sdns/middleware/rpz	1.695s
+ok  	github.com/semihalev/sdns/middleware/views	1.703s
+ok  	github.com/semihalev/sdns/server	1.752s
+ok  	github.com/semihalev/sdns/server/doh	1.707s [no tests to run]
+```
+
+```sh
+bash docs/check-drift.sh
+```
+
+```text
+metrics
+  76 registered, 76 documented, counts agree
+config keys
+  133 keys, index agrees in both directions
+go version
+  go.mod requires 1.27, pages agree
+install commands
+  README and installation page agree
+release platforms
+  installation page covers every released platform
+pinned versions
+  no hard-coded image tags
+
+no drift
+```
+
+## CoreDNS build and full adapter verification
+
+Build output excerpt (dependency resolution messages omitted):
 
 ```sh
 ./scripts/build-poc.sh
@@ -84,105 +129,104 @@ Built /Users/mykolas/dev/coredns-recurse/.build/coredns
 ```
 
 ```sh
-COREDNS_BINARY="$PWD/.build/coredns" go test -run '^TestCoreDNSEndToEnd$' -count=1 -v
+COREDNS_BINARY="$PWD/.build/coredns" RECURSE_LIVE_TEST=1 \
+RECURSE_CONFIG="$PWD/examples/sdns.conf" RECURSE_EXPECT_AD=1 \
+go test -race ./... -count=1 -v
 ```
 
 ```text
 === RUN   TestCoreDNSEndToEnd
 --- PASS: TestCoreDNSEndToEnd (0.05s)
-PASS
-ok  	github.com/MKrupauskas/coredns-recurse	0.257s
-```
-
-## Public recursive lookup
-
-```sh
-COREDNS_BINARY="$PWD/.build/coredns" RECURSE_LIVE_TEST=1 go test -run '^TestCoreDNSPublicRecursion$' -count=1 -v
-```
-
-```text
 === RUN   TestCoreDNSPublicRecursion
-    e2e_test.go:127: udp: [example.org.	300	IN	A	104.20.26.136 example.org.	300	IN	A	172.66.157.237]
-    e2e_test.go:127: tcp: [example.org.	300	IN	A	172.66.157.237 example.org.	300	IN	A	104.20.26.136]
---- PASS: TestCoreDNSPublicRecursion (0.20s)
-PASS
-ok  	github.com/MKrupauskas/coredns-recurse	0.453s
+    e2e_test.go:136: udp: rcode=NOERROR ad=true answer=[example.org.	300	IN	A	172.66.157.237 example.org.	300	IN	A	104.20.26.136 example.org.	300	IN	RRSIG	A 13 2 300 20261109222256 20261107202256 34505 example.org. 97m9hZU16jJCWND+jCr1oIsI5YNVKYf3mestxbcg9C93o7HzizXLhoUvuptbVOfsjFQZ9392E9LXh72QTIejeA==]
+    e2e_test.go:136: tcp: rcode=NOERROR ad=true answer=[example.org.	299	IN	A	172.66.157.237 example.org.	299	IN	A	104.20.26.136 example.org.	299	IN	RRSIG	A 13 2 300 20261109222256 20261107202256 34505 example.org. 97m9hZU16jJCWND+jCr1oIsI5YNVKYf3mestxbcg9C93o7HzizXLhoUvuptbVOfsjFQZ9392E9LXh72QTIejeA==]
+--- PASS: TestCoreDNSPublicRecursion (0.27s)
+=== RUN   TestCoreDNSInvalidReload
+--- PASS: TestCoreDNSInvalidReload (2.06s)
+ok  	github.com/MKrupauskas/coredns-recurse	3.892s
 ```
 
-## Manual UDP and TCP confirmation
+The output above is an excerpt of the complete passing adapter suite, including
+both deterministic binary tests and the authenticated public lookup. The build
+uses the published fork module, not the local SDNS working tree.
 
-Start the server in one terminal:
+## Manual authenticated UDP/TCP lookups
+
+Start the sample configuration in one terminal:
 
 ```sh
 ./.build/coredns -conf examples/Corefile
 ```
 
-The commands below ran in a second terminal. Recorded addresses, ordering,
-request IDs, TTLs, and timing can change; success means `NOERROR`, `rd ra`, and
-an A answer. Stop the server with Ctrl-C afterward.
+Run the commands below in a second terminal. These are the captured outputs;
+addresses, signatures, IDs, TTLs, and timings may change. Success means
+`NOERROR`, `rd ra ad`, A records, and a DNSSEC signature. Stop with Ctrl-C.
 
 ```sh
-dig @127.0.0.1 -p 1053 example.org A +time=12 +tries=1
+dig @127.0.0.1 -p 1053 example.org A +dnssec +time=12 +tries=1
 ```
 
 ```text
-; <<>> DiG 9.10.6 <<>> @127.0.0.1 -p 1053 example.org A +time=12 +tries=1
+; <<>> DiG 9.10.6 <<>> @127.0.0.1 -p 1053 example.org A +dnssec +time=12 +tries=1
 ; (1 server found)
 ;; global options: +cmd
 ;; Got answer:
-;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 15717
-;; flags: qr rd ra; QUERY: 1, ANSWER: 2, AUTHORITY: 0, ADDITIONAL: 1
+;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 18720
+;; flags: qr rd ra ad; QUERY: 1, ANSWER: 3, AUTHORITY: 0, ADDITIONAL: 1
 
 ;; OPT PSEUDOSECTION:
-; EDNS: version: 0, flags:; udp: 4096
+; EDNS: version: 0, flags: do; udp: 4096
 ;; QUESTION SECTION:
 ;example.org.			IN	A
 
 ;; ANSWER SECTION:
 example.org.		300	IN	A	172.66.157.237
 example.org.		300	IN	A	104.20.26.136
+example.org.		300	IN	RRSIG	A 13 2 300 20261109222255 20261107202255 34505 example.org. d0ZzL8Cx1H/OLpGXA/neUU9XEnZWTPOw4NJd2qI6xSKJcCn52WvPAZUk hwqgXWq5BIwPhqraFB4D6L3aOSL/Yg==
 
-;; Query time: 418 msec
+;; Query time: 738 msec
 ;; SERVER: 127.0.0.1#1053(127.0.0.1)
-;; WHEN: Sun Nov 08 12:51:08 PST 2026
-;; MSG SIZE  rcvd: 94
+;; WHEN: Sun Nov 08 13:22:55 PST 2026
+;; MSG SIZE  rcvd: 212
 ```
 
 ```sh
-dig @127.0.0.1 -p 1053 example.org A +tcp +time=12 +tries=1
+dig @127.0.0.1 -p 1053 example.org A +dnssec +tcp +time=12 +tries=1
 ```
 
 ```text
-; <<>> DiG 9.10.6 <<>> @127.0.0.1 -p 1053 example.org A +tcp +time=12 +tries=1
+; <<>> DiG 9.10.6 <<>> @127.0.0.1 -p 1053 example.org A +dnssec +tcp +time=12 +tries=1
 ; (1 server found)
 ;; global options: +cmd
 ;; Got answer:
-;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 38471
-;; flags: qr rd ra; QUERY: 1, ANSWER: 2, AUTHORITY: 0, ADDITIONAL: 1
+;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 41502
+;; flags: qr rd ra ad; QUERY: 1, ANSWER: 3, AUTHORITY: 0, ADDITIONAL: 1
 
 ;; OPT PSEUDOSECTION:
-; EDNS: version: 0, flags:; udp: 4096
+; EDNS: version: 0, flags: do; udp: 4096
 ;; QUESTION SECTION:
 ;example.org.			IN	A
 
 ;; ANSWER SECTION:
-example.org.		300	IN	A	172.66.157.237
-example.org.		300	IN	A	104.20.26.136
+example.org.		299	IN	A	172.66.157.237
+example.org.		299	IN	A	104.20.26.136
+example.org.		299	IN	RRSIG	A 13 2 300 20261109222255 20261107202255 34505 example.org. d0ZzL8Cx1H/OLpGXA/neUU9XEnZWTPOw4NJd2qI6xSKJcCn52WvPAZUk hwqgXWq5BIwPhqraFB4D6L3aOSL/Yg==
 
-;; Query time: 10 msec
+;; Query time: 0 msec
 ;; SERVER: 127.0.0.1#1053(127.0.0.1)
-;; WHEN: Sun Nov 08 12:51:08 PST 2026
-;; MSG SIZE  rcvd: 94
+;; WHEN: Sun Nov 08 13:22:55 PST 2026
+;; MSG SIZE  rcvd: 212
 ```
 
-## Reproducibility and scope
+## Deployment contract and limits
 
-The packaged SDNS patch was checked against a clean archive of its pinned base
-and reverse-checked against the modified checkout. Formatting and
-`git diff --check` passed in both repositories.
+Keep each independently managed persistent instance's state directory separate.
+The host stops query admission and cancels/drains foreground requests before
+stopping SDNS. CoreDNS hooks perform that ownership transfer. Configuration
+reloads create a fresh pipeline; stopped instances are not restarted.
 
-This POC covers direct A records using IPv4 authorities with DNSSEC disabled.
-CNAME target completion, answer caching, full EDNS policy/truncation, IPv6
-upstreams, and long-lived maintenance are follow-up work. No full SDNS module
-suite, allocation gate, cross-platform build matrix, or lint pass is implied by
-the local commands recorded here; those are covered by SDNS's existing CI.
+This integration installs SDNS's resolver, cache, EDNS, failover, and forwarding
+layers. CoreDNS remains responsible for listeners and additional policy plugins.
+It does not install the complete standalone SDNS server, HTTP API, or every
+optional SDNS middleware. Public DNS verification is opt-in; the required CI
+checks stay local and deterministic.

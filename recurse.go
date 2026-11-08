@@ -6,6 +6,7 @@ import (
 	"errors"
 
 	"github.com/coredns/coredns/plugin"
+	"github.com/coredns/coredns/request"
 	"github.com/miekg/dns"
 )
 
@@ -43,12 +44,13 @@ func (p Recurse) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg)
 	if response == nil {
 		return dns.RcodeServerFailure, plugin.Error(p.Name(), errors.New("engine returned no response"))
 	}
-	// Preserve CoreDNS's convention that these codes mean no reply was written.
-	if !plugin.ClientWrite(response.Rcode) {
-		return response.Rcode, nil
-	}
+	// The internal SDNS pipeline runs with a full-size buffer. Fit the final
+	// client reply to its advertised transport limit, preserving SDNS's EDEs
+	// and DNSSEC failure responses instead of replacing them with bare errors.
+	state := request.Request{W: w, Req: r}
+	response.Truncate(state.Size())
 	if err := w.WriteMsg(response); err != nil {
 		return dns.RcodeServerFailure, plugin.Error(p.Name(), err)
 	}
-	return response.Rcode, nil
+	return dns.RcodeSuccess, nil
 }

@@ -30,7 +30,9 @@ func testAuthority(t *testing.T) (string, *atomic.Int32) {
 		m := new(dns.Msg).SetReply(r)
 		m.Authoritative = true
 		q := r.Question[0]
-		if q.Name == "missing." {
+		if q.Name == "alias." && q.Qtype == dns.TypeA {
+			m.Answer = []dns.RR{&dns.CNAME{Hdr: dns.RR_Header{Name: q.Name, Rrtype: dns.TypeCNAME, Class: dns.ClassINET, Ttl: 60}, Target: "example."}}
+		} else if q.Name == "missing." {
 			m.Rcode = dns.RcodeNameError
 			soa, _ := dns.NewRR(". 60 IN SOA ns. hostmaster. 1 3600 600 86400 60")
 			m.Ns = []dns.RR{soa}
@@ -52,7 +54,7 @@ func TestSDNSEngine(t *testing.T) {
 	wasReady := middleware.Ready()
 	engine := newSDNSEngine([]string{addr}, time.Second)
 	t.Cleanup(func() { _ = engine.close() })
-	for _, name := range []string{"example.", "missing."} {
+	for _, name := range []string{"example.", "missing.", "alias."} {
 		r := new(dns.Msg).SetQuestion(name, dns.TypeA)
 		r.SetEdns0(1232, true)
 		original := r.Copy()
@@ -62,7 +64,7 @@ func TestSDNSEngine(t *testing.T) {
 		if name == "missing." {
 			want = dns.RcodeNameError
 		}
-		if err != nil || code != want || w.Msg == nil {
+		if err != nil || code != dns.RcodeSuccess || w.Msg == nil || w.Msg.Rcode != want {
 			t.Fatalf("%s: code=%d err=%v response=%v", name, code, err, w.Msg)
 		}
 		if w.Msg.Id != r.Id || !w.Msg.RecursionAvailable || !w.Msg.RecursionDesired || w.Msg.AuthenticatedData {
@@ -73,6 +75,9 @@ func TestSDNSEngine(t *testing.T) {
 		}
 		if name == "example." && (len(w.Msg.Answer) != 1 || w.Msg.Answer[0].(*dns.A).A.String() != "192.0.2.42") {
 			t.Fatalf("unexpected answer: %v", w.Msg)
+		}
+		if name == "alias." && (len(w.Msg.Answer) != 2 || w.Msg.Answer[1].(*dns.A).A.String() != "192.0.2.42") {
+			t.Fatalf("incomplete CNAME: %v", w.Msg)
 		}
 	}
 	if calls.Load() == 0 {
@@ -133,5 +138,36 @@ func TestSDNSConcurrentInstances(t *testing.T) {
 	wg.Wait()
 	if calls1.Load() == 0 || calls2.Load() == 0 {
 		t.Fatal("resolver instances did not use their own configured roots")
+	}
+}
+
+type queryerFunc func(context.Context, *dns.Msg) (*dns.Msg, error)
+
+func (f queryerFunc) Query(ctx context.Context, r *dns.Msg) (*dns.Msg, error) { return f(ctx, r) }
+
+func TestSDNSShutdown(t *testing.T) {
+	e := newSDNSEngine(rootHints, time.Second)
+	e.pipeline = middleware.NewRegistry().Build(e.cfg)
+	started := make(chan struct{})
+	e.queryer = queryerFunc(func(ctx context.Context, _ *dns.Msg) (*dns.Msg, error) {
+		close(started)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	})
+	done := make(chan error, 1)
+	r := new(dns.Msg).SetQuestion("example.", dns.TypeA)
+	go func() { _, err := e.Resolve(context.Background(), r); done <- err }()
+	<-started
+	if err := e.close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("in-flight query: %v", err)
+	}
+	if _, err := e.Resolve(context.Background(), r); !errors.Is(err, context.Canceled) {
+		t.Fatalf("query after shutdown: %v", err)
+	}
+	if err := e.start(); !errors.Is(err, context.Canceled) {
+		t.Fatalf("restart after shutdown: %v", err)
 	}
 }

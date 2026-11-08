@@ -1,6 +1,9 @@
 package recurse
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/coredns/caddy"
@@ -53,5 +56,23 @@ func TestSetup(t *testing.T) {
 				t.Cleanup(func() { _ = engine.close() })
 			}
 		})
+	}
+}
+
+func TestSetupSDNSConfig(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sdns.conf")
+	data := fmt.Sprintf("directory = %q\ndnssec = \"off\"\nrootservers = [\"192.0.2.1:53\"]\n", dir)
+	if err := os.WriteFile(path, []byte(data), 0600); err != nil {
+		t.Fatal(err)
+	}
+	c := caddy.NewTestController("dns", "recurse "+path)
+	if err := setup(c); err != nil {
+		t.Fatal(err)
+	}
+	e := dnsserver.GetConfig(c).Plugin[0](nil).(Recurse).Engine.(*sdnsEngine)
+	defer e.close()
+	if e.cfg.Directory != dir || e.cfg.RootServers[0] != "192.0.2.1:53" || e.pipeline != nil {
+		t.Fatal("SDNS config was not loaded without starting workers during parsing")
 	}
 }

@@ -1,2 +1,0 @@
-# Patch context must retain upstream whitespace for git apply.
-patches/*.patch -whitespace

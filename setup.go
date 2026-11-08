@@ -2,12 +2,14 @@ package recurse
 
 import (
 	"net"
+	"os"
 	"strconv"
 	"time"
 
 	"github.com/coredns/caddy"
 	"github.com/coredns/coredns/core/dnsserver"
 	"github.com/coredns/coredns/plugin"
+	"github.com/semihalev/sdns/config"
 )
 
 func init() { plugin.Register("recurse", setup) }
@@ -16,16 +18,34 @@ func setup(c *caddy.Controller) error {
 	seen := false
 	roots := rootHints
 	timeout := 10 * time.Second
+	var sdnsConfig *config.Config
 	for c.Next() {
 		if seen {
 			return plugin.Error("recurse", plugin.ErrOnce)
 		}
 		seen = true
-		if len(c.RemainingArgs()) != 0 {
+		args := c.RemainingArgs()
+		if len(args) > 1 {
 			return plugin.Error("recurse", c.ArgErr())
+		}
+		if len(args) == 1 {
+			// Load performs SDNS's ordinary validation/defaulting and initializes
+			// its state directory and cookie secret. Require an existing file so
+			// a misspelled path cannot silently generate a different config.
+			if _, err := os.Stat(args[0]); err != nil {
+				return plugin.Error("recurse", err)
+			}
+			var err error
+			sdnsConfig, err = config.Load(args[0], "coredns-recurse")
+			if err != nil {
+				return plugin.Error("recurse", err)
+			}
 		}
 		seenRoots, seenTimeout := false, false
 		for c.NextBlock() {
+			if sdnsConfig != nil {
+				return plugin.Error("recurse", c.Err("use SDNS configuration or block options, not both"))
+			}
 			option := c.Val()
 			args := c.RemainingArgs()
 			switch option {
@@ -58,9 +78,14 @@ func setup(c *caddy.Controller) error {
 			}
 		}
 	}
-	engine := newSDNSEngine(roots, timeout)
+	var engine *sdnsEngine
+	if sdnsConfig != nil {
+		engine = engineFromConfig(sdnsConfig)
+	} else {
+		engine = newSDNSEngine(roots, timeout)
+	}
+	c.OnStartup(engine.start)
 	c.OnShutdown(engine.close)
-	c.OnRestart(engine.close)
 	dnsserver.GetConfig(c).AddPlugin(func(_ plugin.Handler) plugin.Handler {
 		return Recurse{Engine: engine}
 	})

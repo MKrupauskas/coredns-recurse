@@ -14,8 +14,8 @@ jobs:
           path: coredns-recurse
       - uses: actions/checkout@v4
         with:
-          repository: semihalev/sdns
-          ref: 2226f31b50fd1f146f452165acdcd7520213ea8f
+          repository: MKrupauskas/sdns
+          ref: 7b531a3bbf7999d51f6e039d20a6b92a3082b118
           path: sdns
       - uses: actions/checkout@v4
         with:
@@ -27,15 +27,13 @@ jobs:
           go-version: '1.27.2'
           cache: true
           cache-dependency-path: coredns-recurse/go.sum
-      - name: Apply minimal SDNS embedding patch
-        run: git -C ../sdns apply "$PWD/patches/sdns-embedded.patch"
       - name: Check formatting
         run: test -z "$(gofmt -l *.go)"
       - run: go test -race ./...
-      - name: SDNS embedded referral walk
+      - name: SDNS pipeline and resolver lifecycle
         working-directory: sdns
-        run: go test -race ./middleware/resolver -run '^TestEmbeddedReferralWalk$' -count=1
+        run: go test -race ./middleware ./middleware/resolver -run 'Test(RegistryLifecycle|ResolverPipelineLifecycle|ResolverStopBeforeStart)$' -count=1
       - name: Build CoreDNS with recurse
         run: ./scripts/build-poc.sh
-      - name: CoreDNS UDP and TCP smoke test
-        run: COREDNS_BINARY="$PWD/.build/coredns" go test -run '^TestCoreDNSEndToEnd$' -count=1 -v
+      - name: CoreDNS UDP/TCP and rejected reload
+        run: COREDNS_BINARY="$PWD/.build/coredns" go test -run '^TestCoreDNS(EndToEnd|InvalidReload)$' -count=1 -v

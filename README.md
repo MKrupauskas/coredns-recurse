@@ -1,78 +1,41 @@
 # recurse
 
-An external CoreDNS plugin that embeds the SDNS iterative recursive resolver.
-This POC resolves a direct A question from root hints through authoritative DNS
-servers, inside the CoreDNS process.
-
-```text
-DNS client → CoreDNS → recurse → SDNS → root → TLD → authority → A answer
-```
-
-The initial target is IPv4, direct A records, and DNSSEC disabled. There is no
-forwarder or separate SDNS server. CoreDNS owns the listener; SDNS owns recursion
-and its bounded delegation/glue caches.
-
-## Run the POC
-
-Requires **Go 1.27+**, Git, and sibling checkouts of `coredns-recurse`, `coredns`,
-and `sdns`. The Go minimum comes from the current SDNS module. Verified with
-Go 1.27.2, CoreDNS commit `f79be2a2f8266c2881d01f4c884149e8067569c9`
-(reporting 1.15.0), and SDNS commit
-`2226f31b50fd1f146f452165acdcd7520213ea8f` plus the included patch.
-
-The local SDNS checkout needs the new `resolver.NewEmbedded` constructor. It has
-already been implemented in the companion checkout for this POC. For a fresh
-checkout at the pinned SDNS commit, apply it once from this repository:
-
-```sh
-git -C ../sdns apply "$PWD/patches/sdns-embedded.patch"
-```
-
-Build and run:
-
-```sh
-./scripts/build-poc.sh
-./.build/coredns -conf examples/Corefile
-```
-
-In another terminal:
-
-```sh
-dig @127.0.0.1 -p 1053 example.org A
-dig @127.0.0.1 -p 1053 example.org A +tcp
-```
-
-Expected: `status: NOERROR`, `rd ra`, and A records in the answer. The example
-binds only to `127.0.0.1:1053`. Public recursion requires outbound UDP/TCP port 53.
-The binary continues running until interrupted.
-
-The build script copies the committed CoreDNS source to `.build/coredns-src`,
-adds `recurse` before `forward` in that copy's `plugin.cfg`, generates the plugin
-registration, and builds `.build/coredns`. It leaves the source CoreDNS checkout
-untouched. Alternate checkouts can be supplied as arguments:
-
-```sh
-./scripts/build-poc.sh /path/to/coredns /path/to/sdns
-```
-
-The plugin module deliberately replaces SDNS with `../sdns` because the new
-constructor is not published upstream. The build script also installs this
-replacement in the CoreDNS build module; Go does not inherit dependency modules'
-`replace` directives. Package tests expect the default sibling SDNS checkout.
+An external CoreDNS plugin embedding SDNS's normal recursive resolver, cache,
+EDNS, failover, and forwarding middleware. CoreDNS owns the DNS listeners and
+outer plugin chain; each `recurse` instance owns an independent SDNS pipeline.
 
 ## Configuration
 
-The minimal Corefile is in [examples/Corefile](examples/Corefile):
+Use an ordinary SDNS TOML configuration file:
 
 ```corefile
 .:1053 {
     bind 127.0.0.1
     errors
-    recurse
+    recurse examples/sdns.conf
 }
 ```
 
-Optional settings:
+The [sample SDNS configuration](examples/sdns.conf) enables DNSSEC validation,
+root priming, automated trust-anchor upkeep, cache pruning, bounded nameserver
+refresh/enrichment, and TCP pooling. Its trust-anchor seeds come from SDNS's
+normal default configuration. SDNS maintains their state in `.build/sdns-state`.
+Keep that directory across restarts. Independently managed instances must use
+separate state directories. Configuration paths follow CoreDNS's working directory.
+
+The file is loaded through SDNS's ordinary `config.Load`, including validation,
+defaults, state-directory initialization, and random cookie-secret generation.
+It must already exist; an incorrect path fails startup. A Corefile block cannot
+be combined with the file argument.
+
+The embedded middleware consumes SDNS's resolver, cache, EDNS, forwarding, and
+failover settings. Standalone listeners, API, logging configuration, and optional
+policy middlewares such as blocklists, RPZ, hosts, Kubernetes, and DNS64 are not
+installed by this plugin. Configure those policies through CoreDNS's outer chain
+where needed; this is not a drop-in replacement for the entire SDNS server.
+
+For compatibility, `recurse` alone uses built-in IPv4 root hints with DNSSEC off.
+It also accepts the existing small block form:
 
 ```corefile
 recurse {
@@ -81,73 +44,75 @@ recurse {
 }
 ```
 
-`root` replaces the built-in 13 IPv4 root hints with explicit IPv4 address:port
-endpoints. These must serve the root namespace; they are not recursive upstreams.
-`timeout` is a positive duration bounding the whole lookup, default `10s`.
-Each option and `recurse` itself may appear only once per server block.
+`root` supplies authoritative root hints, not recursive upstreams. `timeout`
+bounds a lookup and defaults to 10 seconds. Use the SDNS config-file form for
+DNSSEC and the full set of supported resolver options.
 
-This is a terminal handler. Plugin execution order comes from `plugin.cfg`, as
-explained in the [CoreDNS plugin documentation](https://coredns.io/manual/plugins/).
-For the initial demo, use the example without other answering plugins.
+## Build and run
 
-## Research and implementation
-
-The existing SDNS `Resolver.Resolve` API exposes internal walk state, including an
-`internal/authority` type and private root-server state. Its public DNS middleware
-handler already provides the right DNS semantics, and the existing `Registry`,
-`Pipeline`, and `NewPipelineQueryer` APIs support in-memory calls and internal
-nameserver lookups. See [SDNS's resolver API](https://pkg.go.dev/github.com/semihalev/sdns/middleware/resolver)
-and [middleware API](https://pkg.go.dev/github.com/semihalev/sdns/middleware).
-
-The plan implemented here was to add an embedding constructor, adapt the existing
-in-memory API, and then verify both referral walking and a compiled external
-plugin. The SDNS production-code patch is only **27 added lines and 4 removed
-lines in two files**, plus a regression test:
-
-- `New` and `NewResolver` keep their existing behavior.
-- `NewEmbedded` reuses their initialization while skipping maintenance and
-  enrichment startup. It never waits for global middleware readiness.
-- No recursive-walk or network-exchange algorithm changes are needed.
-
-The CoreDNS adapter builds a resolver-only pipeline per configured instance,
-wires its internal queryer, copies incoming requests, bounds their lifetime, and
-registers shutdown/restart hooks. It never publishes an SDNS global pipeline.
-Failures follow CoreDNS's response-writing convention and produce SERVFAIL.
-The exact SDNS change and test are in [patches/sdns-embedded.patch](patches/sdns-embedded.patch).
-
-## Verification
-
-See [the test plan and recorded command outputs](docs/test-plan.md) for the
-coverage matrix, local results, and manual UDP/TCP lookup transcript.
+Requires Go 1.27+ and a CoreDNS Git checkout (default `../coredns`). The module
+pins the lifecycle implementation in the SDNS fork; it does not apply patches or
+require a sibling SDNS checkout. Upstreaming that commit can later replace the
+fork pin without changing the embedding interface.
 
 ```sh
-go test ./...
-go test -race ./...
-(cd ../sdns && go test -race ./middleware/resolver -run 'Test(Embedded|HermeticResolve|Handler)' -count=1)
+go test -race ./... -count=1
 ./scripts/build-poc.sh
-COREDNS_BINARY="$PWD/.build/coredns" go test -run '^TestCoreDNSEndToEnd$' -v
-COREDNS_BINARY="$PWD/.build/coredns" RECURSE_LIVE_TEST=1 go test -run '^TestCoreDNSPublicRecursion$' -v
+./.build/coredns -conf examples/Corefile
 ```
 
-Regular tests use local unprivileged DNS sockets and check A answers, NXDOMAIN,
-request preservation, deadlines, cancellation, setup parsing, and instance
-isolation. The SDNS regression test follows real referrals to a synthetic zone
-with out-of-bailiwick nameservers, forcing the internal queryer to resolve their
-addresses. Its existing test-only address mapper redirects advertised port-53
-endpoints to unprivileged local ports.
+In a second terminal:
 
-`TestCoreDNSEndToEnd` starts the compiled CoreDNS binary and checks both UDP and
-TCP through a local authoritative fixture. `TestCoreDNSPublicRecursion` starts a
-fresh binary with default hints and checks a real `example.org A` lookup over
-both transports. The binary tests skip unless `COREDNS_BINARY` is set; public
-recursion also requires the explicit live-test flag. CI runs the deterministic
-binary smoke test and applies the same SDNS patch to the pinned upstream source.
+```sh
+dig @127.0.0.1 -p 1053 example.org A +dnssec
+dig @127.0.0.1 -p 1053 example.org A +dnssec +tcp
+```
 
-## Next iterations
+Expected: `NOERROR`, `rd ra ad`, and A records. Stop the server with Ctrl-C.
+Public recursion requires outbound UDP/TCP port 53. The example listens on
+`127.0.0.1:1053`.
 
-This is a narrow POC, not a complete resolver integration. DNSSEC validation,
-IPv6 upstream access, persistent state, priming, automated trust-anchor upkeep,
-and periodic cache pruning are disabled. Cache expiry checks still apply.
-CNAME-only answers are returned as received; completing their target chain needs
-SDNS's cache middleware or another follow-up implementation. Client-facing EDNS
-policy, large-response truncation, and answer caching also need further work.
+The build script copies committed CoreDNS source into `.build/coredns-src`, adds
+`recurse` before `forward` in that copy's `plugin.cfg`, generates registration,
+and builds `.build/coredns`. It preserves the original CoreDNS checkout. An
+optional second argument uses a local SDNS checkout for development:
+
+```sh
+./scripts/build-poc.sh /path/to/coredns /path/to/sdns
+```
+
+## Lifecycle
+
+There is no embedding-specific SDNS constructor or background-disable setting.
+The adapter uses `resolver.New(cfg)` and `Registry.Build(cfg)`. Building an SDNS
+pipeline wires dependencies, restores state, then starts maintenance. The same
+lifecycle is used by standalone SDNS. See [SDNS's middleware API](https://pkg.go.dev/github.com/semihalev/sdns/middleware).
+
+CoreDNS constructs the pipeline in its startup hook after accepting the entire
+Corefile. Shutdown rejects new queries, cancels and drains in-flight calls,
+stops pipeline handlers, joins instance-owned background work, closes pooling
+and cleanup loops, and persists configured cache state. Failed configuration
+reloads leave the existing instance serving. Shared bounded SDNS enrichment
+workers remain process-wide and skip work belonging to stopped instances.
+
+SDNS's cache completes CNAME chains. Its EDNS middleware handles DNSSEC response
+policy, and the outer adapter applies the client's UDP/TCP size limit. Complete
+SDNS failure replies, including Extended DNS Errors, are retained.
+
+## Automated testing
+
+[The test plan](docs/test-plan.md) records exact commands, outputs, coverage,
+configuration, and limits. CI runs plugin race tests, the SDNS lifecycle tests,
+a complete CoreDNS build, and deterministic UDP/TCP binary smoke tests. Existing
+SDNS referral and DNSSEC tests remain the recursion-algorithm coverage.
+
+The optional live test verifies an authenticated public answer with the sample
+configuration:
+
+```sh
+COREDNS_BINARY="$PWD/.build/coredns" RECURSE_LIVE_TEST=1 \
+RECURSE_CONFIG="$PWD/examples/sdns.conf" RECURSE_EXPECT_AD=1 \
+go test -run '^TestCoreDNSPublicRecursion$' -count=1 -v
+```
+
+This requires public DNS access and is kept separate from deterministic CI.
