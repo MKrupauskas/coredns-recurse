@@ -106,11 +106,11 @@ func TestCoreDNSPublicRecursion(t *testing.T) {
 	if os.Getenv("RECURSE_LIVE_TEST") != "1" {
 		t.Skip("set RECURSE_LIVE_TEST=1 to query public DNS authorities")
 	}
-	options := ""
-	if path := os.Getenv("RECURSE_CONFIG"); path != "" {
-		options = " " + path
+	path := os.Getenv("RECURSE_CONFIG")
+	if path == "" {
+		path = "examples/sdns.conf"
 	}
-	addr, _ := startCoreDNS(t, options)
+	addr, _ := startCoreDNS(t, " "+path)
 	for _, network := range []string{"udp", "tcp"} {
 		r := new(dns.Msg).SetQuestion("example.org.", dns.TypeA)
 		r.SetEdns0(1232, true)

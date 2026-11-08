@@ -25,8 +25,8 @@ separate state directories. Configuration paths follow CoreDNS's working directo
 
 The file is loaded through SDNS's ordinary `config.Load`, including validation,
 defaults, state-directory initialization, and random cookie-secret generation.
-It must already exist; an incorrect path fails startup. A Corefile block cannot
-be combined with the file argument.
+It must already exist; an incorrect path fails startup. `recurse CONFIGFILE` is
+the only supported syntax; resolver options belong in that SDNS file.
 
 The embedded middleware consumes SDNS's resolver, cache, EDNS, forwarding, and
 failover settings. Standalone listeners, API, logging configuration, and optional
@@ -34,19 +34,16 @@ policy middlewares such as blocklists, RPZ, hosts, Kubernetes, and DNS64 are not
 installed by this plugin. Configure those policies through CoreDNS's outer chain
 where needed; this is not a drop-in replacement for the entire SDNS server.
 
-For compatibility, `recurse` alone uses built-in IPv4 root hints with DNSSEC off.
-It also accepts the existing small block form:
+The plugin has no compiled-in root address list. Bootstrap addresses come from
+SDNS's `rootservers` / `root6servers` configuration. The example contains an
+editable seed list; obtain current addresses from [IANA's root hints](https://www.iana.org/domains/root/files).
+SDNS's normal priming discovers the current root set from those seeds and
+refreshes it during operation, as described in [RFC 9609](https://www.rfc-editor.org/rfc/rfc9609.html).
 
-```corefile
-recurse {
-    root 198.41.0.4:53 192.33.4.12:53
-    timeout 10s
-}
-```
-
-`root` supplies authoritative root hints, not recursive upstreams. `timeout`
-bounds a lookup and defaults to 10 seconds. Use the SDNS config-file form for
-DNSSEC and the full set of supported resolver options.
+The OS's resolver settings list servers that perform lookups on its behalf;
+they are not a source of authoritative root hints. A deployment must supply
+usable bootstrap hints in the SDNS config; omitting them fails configuration
+validation.
 
 ## Build and run
 

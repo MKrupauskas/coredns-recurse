@@ -16,6 +16,12 @@ wires all dependencies, restores state, and starts maintenance. Owning pipelines
 stop and persist their handlers through instance methods. There is no special
 embedding constructor, constructor boolean, or background-disable setting.
 
+`recurse CONFIGFILE` requires an existing ordinary SDNS configuration file.
+Root bootstrap addresses come only from its `rootservers` / `root6servers`
+settings. The plugin has no compiled-in hint list or custom `root` block.
+SDNS's ordinary priming refreshes the live root set from the configured seeds;
+OS recursive upstreams are not substituted for root hints.
+
 Maintenance includes root priming, trust-anchor upkeep, pruning, bounded
 nameserver enrichment, refresh, and TCP pooling. Shutdown cancels/joins owned
 work and cleanup loops. Shared bounded enrichment workers skip stopped owners.
@@ -29,7 +35,7 @@ The standalone SDNS server uses the same lifecycle.
 | `TestResolverPipelineLifecycle` | Ordinary configuration starts actual local root priming independently of global readiness; shutdown cancels/joins active enrichment and closes TCP/singleflight cleanup. | Plugin CI and SDNS's existing test suite. |
 | `TestResolverStopBeforeStart` | A stopped instance cannot restart. | Plugin CI and SDNS's existing test suite. |
 | Existing SDNS tests | Recursive referrals, DNSSEC validation, caching, pooling, and server behavior. The new tests do not rebuild the existing synthetic referral network. | Full local SDNS race suite; existing SDNS CI definition. |
-| Plugin race tests | A/NXDOMAIN, CNAME completion, immutable caller messages, deadlines, cancellation, concurrent independent instances, shutdown admission/drain, UDP truncation, retained DNSSEC error details, and regular SDNS config loading. | Plugin CI. |
+| Plugin race tests | A/NXDOMAIN, CNAME completion, immutable caller messages, deadlines, cancellation, concurrent independent instances, shutdown admission/drain, UDP truncation, retained DNSSEC error details, and regular SDNS config loading. Missing files, missing root hints, and legacy bare/block syntax are rejected without fallback hints. | Plugin CI. |
 | `TestCoreDNSEndToEnd` | Real CoreDNS binary, regular SDNS config file, local authority, UDP and TCP A replies, and graceful shutdown. | Plugin CI. |
 | `TestCoreDNSInvalidReload` | A rejected replacement configuration leaves the previous resolver serving. | Plugin CI. |
 | `TestCoreDNSPublicRecursion` | Normal sample config validates a public A lookup, with AD required over UDP and TCP. | Explicit opt-in automated test; outbound DNS required. |
@@ -138,12 +144,30 @@ go test -race ./... -count=1 -v
 === RUN   TestCoreDNSEndToEnd
 --- PASS: TestCoreDNSEndToEnd (0.05s)
 === RUN   TestCoreDNSPublicRecursion
-    e2e_test.go:136: udp: rcode=NOERROR ad=true answer=[example.org.	300	IN	A	172.66.157.237 example.org.	300	IN	A	104.20.26.136 example.org.	300	IN	RRSIG	A 13 2 300 20261109222256 20261107202256 34505 example.org. 97m9hZU16jJCWND+jCr1oIsI5YNVKYf3mestxbcg9C93o7HzizXLhoUvuptbVOfsjFQZ9392E9LXh72QTIejeA==]
-    e2e_test.go:136: tcp: rcode=NOERROR ad=true answer=[example.org.	299	IN	A	172.66.157.237 example.org.	299	IN	A	104.20.26.136 example.org.	299	IN	RRSIG	A 13 2 300 20261109222256 20261107202256 34505 example.org. 97m9hZU16jJCWND+jCr1oIsI5YNVKYf3mestxbcg9C93o7HzizXLhoUvuptbVOfsjFQZ9392E9LXh72QTIejeA==]
---- PASS: TestCoreDNSPublicRecursion (0.27s)
+    e2e_test.go:136: udp: rcode=NOERROR ad=true answer=[example.org.	300	IN	A	172.66.157.237 example.org.	300	IN	A	104.20.26.136 example.org.	300	IN	RRSIG	A 13 2 300 20261109223545 20261107203545 34505 example.org. jGcdjKLfsr8YK1KYwCScHGuQVKpXLZDH7plBSlS/XBctGqN/rl9GYRsmhLrXOCaL6u6gsa3UZ6Qhfd170DQSug==]
+    e2e_test.go:136: tcp: rcode=NOERROR ad=true answer=[example.org.	299	IN	A	172.66.157.237 example.org.	299	IN	A	104.20.26.136 example.org.	299	IN	RRSIG	A 13 2 300 20261109223545 20261107203545 34505 example.org. jGcdjKLfsr8YK1KYwCScHGuQVKpXLZDH7plBSlS/XBctGqN/rl9GYRsmhLrXOCaL6u6gsa3UZ6Qhfd170DQSug==]
+--- PASS: TestCoreDNSPublicRecursion (0.69s)
 === RUN   TestCoreDNSInvalidReload
---- PASS: TestCoreDNSInvalidReload (2.06s)
-ok  	github.com/MKrupauskas/coredns-recurse	3.892s
+--- PASS: TestCoreDNSInvalidReload (2.07s)
+=== RUN   TestSetup
+=== RUN   TestSetup/duplicate_directive
+=== RUN   TestSetup/missing_config_argument
+=== RUN   TestSetup/legacy_block
+=== RUN   TestSetup/extra_argument
+=== RUN   TestSetup/missing_file
+=== RUN   TestSetup/missing_root_hints
+=== RUN   TestSetup/config_and_block
+--- PASS: TestSetup (0.00s)
+    --- PASS: TestSetup/duplicate_directive (0.00s)
+    --- PASS: TestSetup/missing_config_argument (0.00s)
+    --- PASS: TestSetup/legacy_block (0.00s)
+    --- PASS: TestSetup/extra_argument (0.00s)
+    --- PASS: TestSetup/missing_file (0.00s)
+    --- PASS: TestSetup/missing_root_hints (0.00s)
+    --- PASS: TestSetup/config_and_block (0.00s)
+=== RUN   TestSetupSDNSConfig
+--- PASS: TestSetupSDNSConfig (0.00s)
+ok  	github.com/MKrupauskas/coredns-recurse	4.193s
 ```
 
 The output above is an excerpt of the complete passing adapter suite, including

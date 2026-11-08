@@ -17,14 +17,6 @@ import (
 	"github.com/semihalev/sdns/middleware/resolver"
 )
 
-// Root hints, not recursive upstreams: SDNS follows referrals from these servers.
-var rootHints = []string{
-	"198.41.0.4:53", "170.247.170.2:53", "192.33.4.12:53",
-	"199.7.91.13:53", "192.203.230.10:53", "192.5.5.241:53",
-	"192.112.36.4:53", "198.97.190.53:53", "192.36.148.17:53",
-	"192.58.128.30:53", "193.0.14.129:53", "199.7.83.42:53", "202.12.27.33:53",
-}
-
 type sdnsEngine struct {
 	mu        sync.Mutex
 	closed    bool
@@ -36,19 +28,6 @@ type sdnsEngine struct {
 	pipeline  *middleware.Pipeline
 	queryer   middleware.Queryer
 	timeout   time.Duration
-}
-
-func newSDNSEngine(roots []string, timeout time.Duration) *sdnsEngine {
-	cfg := &config.Config{
-		RootServers:           append([]string(nil), roots...),
-		DNSSEC:                "off",
-		Maxdepth:              30,
-		QueryTimeout:          config.Duration{Duration: timeout},
-		Timeout:               config.Duration{Duration: 2 * time.Second},
-		QnameMaxMinimizeCount: new(10),
-		CacheSize:             10000,
-	}
-	return engineFromConfig(cfg)
 }
 
 func engineFromConfig(cfg *config.Config) *sdnsEngine {

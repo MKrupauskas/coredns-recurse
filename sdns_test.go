@@ -13,11 +13,24 @@ import (
 	"github.com/coredns/coredns/plugin/pkg/dnstest"
 	"github.com/coredns/coredns/plugin/test"
 	"github.com/miekg/dns"
+	"github.com/semihalev/sdns/config"
 	"github.com/semihalev/sdns/middleware"
 )
 
+func newSDNSEngine(roots []string, timeout time.Duration) *sdnsEngine {
+	return engineFromConfig(&config.Config{
+		RootServers:           roots,
+		DNSSEC:                "off",
+		Maxdepth:              30,
+		QueryTimeout:          config.Duration{Duration: timeout},
+		Timeout:               config.Duration{Duration: 2 * time.Second},
+		QnameMaxMinimizeCount: new(10),
+		CacheSize:             10000,
+	})
+}
+
 // A real UDP authority on an unprivileged port. Referral walking is tested in
-// SDNS's embedded_test.go; the binary smoke test also performs public recursion.
+// SDNS's hermetic_test.go; the binary smoke test also performs public recursion.
 func testAuthority(t *testing.T) (string, *atomic.Int32) {
 	t.Helper()
 	conn, err := net.ListenPacket("udp4", "127.0.0.1:0")
@@ -146,7 +159,7 @@ type queryerFunc func(context.Context, *dns.Msg) (*dns.Msg, error)
 func (f queryerFunc) Query(ctx context.Context, r *dns.Msg) (*dns.Msg, error) { return f(ctx, r) }
 
 func TestSDNSShutdown(t *testing.T) {
-	e := newSDNSEngine(rootHints, time.Second)
+	e := newSDNSEngine(nil, time.Second)
 	e.pipeline = middleware.NewRegistry().Build(e.cfg)
 	started := make(chan struct{})
 	e.queryer = queryerFunc(func(ctx context.Context, _ *dns.Msg) (*dns.Msg, error) {
