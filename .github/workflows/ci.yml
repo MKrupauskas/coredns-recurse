@@ -5,23 +5,35 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: coredns-recurse
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: coredns-recurse
+      - uses: actions/checkout@v4
+        with:
+          repository: MKrupauskas/sdns
+          ref: 7b531a3bbf7999d51f6e039d20a6b92a3082b118
+          path: sdns
+      - uses: actions/checkout@v4
+        with:
+          repository: coredns/coredns
+          ref: f79be2a2f8266c2881d01f4c884149e8067569c9
+          path: coredns
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.25.3'
+          go-version: '1.27.2'
           cache: true
+          cache-dependency-path: coredns-recurse/go.sum
       - name: Check formatting
         run: test -z "$(gofmt -l *.go)"
-      - run: go test ./...
+      - run: go test -race ./...
+      - name: SDNS pipeline and resolver lifecycle
+        working-directory: sdns
+        run: go test -race ./middleware ./middleware/resolver -run 'Test(RegistryLifecycle|ResolverPipelineLifecycle|ResolverStopBeforeStart)$' -count=1
       - name: Build CoreDNS with recurse
-        shell: bash
-        run: |
-          git clone --depth 1 --branch v1.13.1 https://github.com/coredns/coredns.git "$RUNNER_TEMP/coredns"
-          cd "$RUNNER_TEMP/coredns"
-          sed -i '/^forward:forward/i recurse:github.com/MKrupauskas/coredns-recurse' plugin.cfg
-          go mod edit -replace github.com/MKrupauskas/coredns-recurse="$GITHUB_WORKSPACE"
-          go get github.com/MKrupauskas/coredns-recurse
-          go generate
-          go build -o coredns .
-          ./coredns -plugins | grep -x recurse
+        run: ./scripts/build-poc.sh
+      - name: CoreDNS UDP/TCP and rejected reload
+        run: COREDNS_BINARY="$PWD/.build/coredns" go test -run '^TestCoreDNS(EndToEnd|InvalidReload)$' -count=1 -v

@@ -1,3 +1,4 @@
 /coredns
+/.build/
 *.test
 coverage.out
