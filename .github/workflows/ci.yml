@@ -5,23 +5,37 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: coredns-recurse
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: coredns-recurse
+      - uses: actions/checkout@v4
+        with:
+          repository: semihalev/sdns
+          ref: 2226f31b50fd1f146f452165acdcd7520213ea8f
+          path: sdns
+      - uses: actions/checkout@v4
+        with:
+          repository: coredns/coredns
+          ref: f79be2a2f8266c2881d01f4c884149e8067569c9
+          path: coredns
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.25.3'
+          go-version: '1.27.2'
           cache: true
+          cache-dependency-path: coredns-recurse/go.sum
+      - name: Apply minimal SDNS embedding patch
+        run: git -C ../sdns apply "$PWD/patches/sdns-embedded.patch"
       - name: Check formatting
         run: test -z "$(gofmt -l *.go)"
-      - run: go test ./...
+      - run: go test -race ./...
+      - name: SDNS embedded referral walk
+        working-directory: sdns
+        run: go test -race ./middleware/resolver -run '^TestEmbeddedReferralWalk$' -count=1
       - name: Build CoreDNS with recurse
-        shell: bash
-        run: |
-          git clone --depth 1 --branch v1.13.1 https://github.com/coredns/coredns.git "$RUNNER_TEMP/coredns"
-          cd "$RUNNER_TEMP/coredns"
-          sed -i '/^forward:forward/i recurse:github.com/MKrupauskas/coredns-recurse' plugin.cfg
-          go mod edit -replace github.com/MKrupauskas/coredns-recurse="$GITHUB_WORKSPACE"
-          go get github.com/MKrupauskas/coredns-recurse
-          go generate
-          go build -o coredns .
-          ./coredns -plugins | grep -x recurse
+        run: ./scripts/build-poc.sh
+      - name: CoreDNS UDP and TCP smoke test
+        run: COREDNS_BINARY="$PWD/.build/coredns" go test -run '^TestCoreDNSEndToEnd$' -count=1 -v

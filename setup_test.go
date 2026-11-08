@@ -13,8 +13,22 @@ func TestSetup(t *testing.T) {
 		valid bool
 	}{
 		{"recurse", true},
+		{"recurse {\n root 127.0.0.1:1054\n timeout 1s\n}", true},
+		{"recurse {\n root 198.41.0.4:53 192.33.4.12:53\n}", true},
 		{"recurse extra", false},
 		{"recurse {\n option\n}", false},
+		{"recurse {\n root\n}", false},
+		{"recurse {\n root localhost:53\n}", false},
+		{"recurse {\n root 127.0.0.1:0\n}", false},
+		{"recurse {\n root 127.0.0.1:65536\n}", false},
+		{"recurse {\n root [::1]:53\n}", false},
+		{"recurse {\n root 127.0.0.1:53\n root 127.0.0.2:53\n}", false},
+		{"recurse {\n timeout\n}", false},
+		{"recurse {\n timeout 0s\n}", false},
+		{"recurse {\n timeout -1s\n}", false},
+		{"recurse {\n timeout bad\n}", false},
+		{"recurse {\n timeout 1s extra\n}", false},
+		{"recurse {\n timeout 1s\n timeout 2s\n}", false},
 		{"recurse\nrecurse", false},
 	} {
 		t.Run(tc.input, func(t *testing.T) {
@@ -32,9 +46,11 @@ func TestSetup(t *testing.T) {
 				if handler.Name() != "recurse" {
 					t.Fatalf("name = %q", handler.Name())
 				}
-				if _, ok := handler.(Recurse).Engine.(unimplementedEngine); !ok {
-					t.Fatal("default engine is not the stub")
+				engine, ok := handler.(Recurse).Engine.(*sdnsEngine)
+				if !ok {
+					t.Fatal("default engine is not SDNS")
 				}
+				t.Cleanup(func() { _ = engine.close() })
 			}
 		})
 	}

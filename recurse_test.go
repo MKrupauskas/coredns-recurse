@@ -21,10 +21,9 @@ func TestFailuresNeverWriteAnswer(t *testing.T) {
 		engine Engine
 		want   error
 	}{
-		{"zero value", nil, ErrUnimplemented},
-		{"default", unimplementedEngine{}, ErrUnimplemented},
+		{"zero value", nil, ErrNoEngine},
 		{"nil response", engineFunc(func(context.Context, *dns.Msg) (*dns.Msg, error) { return nil, nil }), nil},
-		{"response with error", engineFunc(func(context.Context, *dns.Msg) (*dns.Msg, error) { return new(dns.Msg), ErrUnimplemented }), ErrUnimplemented},
+		{"response with error", engineFunc(func(context.Context, *dns.Msg) (*dns.Msg, error) { return new(dns.Msg), ErrNoEngine }), ErrNoEngine},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			w := dnstest.NewRecorder(&test.ResponseWriter{})

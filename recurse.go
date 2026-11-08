@@ -1,4 +1,4 @@
-// Package recurse provides an external CoreDNS recursive resolver stub.
+// Package recurse embeds the SDNS recursive resolver in an external CoreDNS plugin.
 package recurse
 
 import (
@@ -9,8 +9,8 @@ import (
 	"github.com/miekg/dns"
 )
 
-// ErrUnimplemented indicates that recursive resolution is not implemented.
-var ErrUnimplemented = errors.New("recursive resolution is not implemented")
+// ErrNoEngine indicates a handler that was not initialized by CoreDNS setup.
+var ErrNoEngine = errors.New("recursive resolver is not initialized")
 
 // Engine resolves a DNS request. Implementations must be safe for concurrent use,
 // honor ctx, and return a complete response or an error. They must not write replies.
@@ -19,7 +19,7 @@ type Engine interface {
 }
 
 // Recurse is a terminal handler; it never falls through to another plugin.
-// A nil Engine behaves like the default, unimplemented engine.
+// A nil Engine fails closed; setup installs the SDNS engine.
 type Recurse struct {
 	Engine Engine
 }
@@ -34,7 +34,7 @@ func (Recurse) Name() string { return "recurse" }
 func (p Recurse) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (int, error) {
 	engine := p.Engine
 	if engine == nil {
-		engine = unimplementedEngine{}
+		return dns.RcodeServerFailure, plugin.Error(p.Name(), ErrNoEngine)
 	}
 	response, err := engine.Resolve(ctx, r)
 	if err != nil {
@@ -51,10 +51,4 @@ func (p Recurse) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg)
 		return dns.RcodeServerFailure, plugin.Error(p.Name(), err)
 	}
 	return response.Rcode, nil
-}
-
-type unimplementedEngine struct{}
-
-func (unimplementedEngine) Resolve(context.Context, *dns.Msg) (*dns.Msg, error) {
-	return nil, ErrUnimplemented
 }
