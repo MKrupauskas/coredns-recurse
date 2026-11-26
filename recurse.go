@@ -9,6 +9,8 @@ import (
 	"github.com/miekg/dns"
 )
 
+const pluginName = "recurse"
+
 // ErrUnimplemented indicates that recursive resolution is not implemented.
 var ErrUnimplemented = errors.New("recursive resolution is not implemented")
 
@@ -56,5 +58,9 @@ func (p Recurse) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg)
 type unimplementedEngine struct{}
 
 func (unimplementedEngine) Resolve(context.Context, *dns.Msg) (*dns.Msg, error) {
+	start := time.Now()
+	defer func() {
+		recurseDuration.Observe(time.Since(start).Seconds())
+	}()
 	return nil, ErrUnimplemented
 }
